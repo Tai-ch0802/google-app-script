@@ -1,104 +1,96 @@
 /**
- * 每日獲取市場指數資料 (從 Google 試算表), CNN 恐懼與貪婪指數，並寄送郵件報告 (表格化版本).
+ * 每日獲取市場指數資料 (從 Google 試算表), CNN 恐懼與貪婪指數，並寄送郵件報告 (GEEK 版).
  */
 function sendDailyMarketIndexReport() {
   // ** 設定區 **
   const recipientEmail = "";  //  請將 "您的 Gmail 信箱地址"  替換成您的 Gmail 電子郵件地址
   const emailSubject = "每日市場指數報告 (表格化)"; // 修改郵件主旨
   const timeZone = "Asia/Taipei"; // 時區設定為台北，您可以根據您的所在地調整時區
-
-  // ** 程式碼區 - 請勿修改以下程式碼，除非您了解程式碼運作原理 **
+  const ALERT_THRESHOLD = 2.0; // 設定警報門檻 (百分比)
 
   try {
-    // 1. 取得市場指數資料 (從 Google 試算表)
-    const indexData = getIndex();
+    const indexData = getIndex(); 
+    if (typeof indexData === 'string' && indexData.startsWith("N/A -")) throw new Error(indexData);
+    
+    const fearGreedData = getFearGreedIndex(); 
+    const fgiValue = parseFloat(fearGreedData.indexValue);
 
-    //  檢查 getIndex() 是否回傳錯誤訊息字串
-    if (typeof indexData === 'string' && indexData.startsWith("N/A -")) {
-      throw new Error(indexData); //  如果是錯誤訊息，直接拋出錯誤，讓 catch 區塊處理錯誤通知郵件
+    let isAlert = false;
+    let alertMessages = [];
+
+    // 1. 偵測 FGI 警報
+    if (fgiValue <= 25) {
+      alertMessages.push("EXTREME FEAR");
+      isAlert = true;
+    } else if (fgiValue >= 75) {
+      alertMessages.push("MARKET OVERHEAT");
+      isAlert = true;
     }
 
-
-    // 2. 取得 CNN 恐懼與貪婪指數
-    const fearGreedIndexData = getFearGreedIndex();
-    const fearGreedIndexValue = fearGreedIndexData.indexValue;
-    const fearGreedIndexCategory = fearGreedIndexData.indexCategory;
-
-
-    // 3. 建立郵件內容 (HTML 表格化)
-    let emailBody = `<!DOCTYPE html><html><head><style>body { font-family: Arial, sans-serif; } .index-value { font-size: 18px; font-weight: bold; color: #3367D6; } .index-category { font-style: italic; color: #666; } table { border-collapse: collapse; width: 100%; margin-top: 20px; } th, td { border: 1px solid #ccc; padding: 8px; text-align: left; } th { background-color: #f0f0f0; } .positive-change { background-color: #e0f7fa; /* 淺綠色 */ } .negative-change { background-color: #ffdddd; /* 淺紅色 */ }</style></head><body>`; // 加入 positive-change 和 negative-change CSS class
-    emailBody += `<h1>每日市場指數報告</h1>`;
-    emailBody += `<p>日期：${Utilities.formatDate(new Date(), timeZone, "yyyy-MM-dd HH:mm:ss")}</p>`; // 顯示報告產生時間 (台北時區)
-
-    //  建立市場指數資料表格
-    emailBody += `<h2>市場指數</h2>`;
-    emailBody += `<table>`;
-    emailBody += `<thead><tr><th>名稱</th><th>價格/指數</th><th>和前一日變動百分比</th><th>前一天的收盤價</th><th>52週最高價</th><th>52週最低價</th></tr></thead><tbody>`;
-
-    if (Array.isArray(indexData)) { // 檢查 indexData 是否為陣列
+    // 2. 處理市場數據：整合計算水位與波動監控
+    if (Array.isArray(indexData)) {
       indexData.forEach(item => {
-        const changePercent = parseFloat(item.changePercent); // 先將變動百分比轉換為數字
-
-        let changePercentClass = ''; // 預設為空 class
-        if (!isNaN(changePercent)) { // 檢查是否為有效數字
-          if (changePercent > 0) {
-            changePercentClass = 'positive-change'; // 正值套用 positive-change class
-          } else if (changePercent < 0) {
-            changePercentClass = 'negative-change'; // 負值套用 negative-change class
-          }
+        // --- A. 計算水位百分比 ---
+        const current = parseFloat(item.price);
+        const high = parseFloat(item.fiftyTwoWeekHigh);
+        const low = parseFloat(item.fiftyTwoWeekLow);
+        
+        if (!isNaN(current) && !isNaN(high) && !isNaN(low) && high !== low) {
+          let position = ((current - low) / (high - low) * 100);
+          item.rangePosition = Math.max(0, Math.min(100, position)).toFixed(0);
+        } else {
+          item.rangePosition = null; 
         }
 
-        emailBody += `<tr>`;
-        emailBody += `<td>${item.name}</td>`;
-        emailBody += `<td class="index-value">${item.price}</td>`;
-        emailBody += `<td class="${changePercentClass}">${item.changePercent}</td>`; // 動態加入 class
-        emailBody += `<td>${item.previousClose}</td>`;
-        emailBody += `<td>${item.fiftyTwoWeekHigh}</td>`;
-        emailBody += `<td>${item.fiftyTwoWeekLow}</td>`;
-        emailBody += `</tr>`;
+        // --- B. 偵測波動警報 (修復處) ---
+        // 確保排除百分比符號後轉換為數字進行比較
+        const changeVal = parseFloat(item.changePercent.toString().replace('%', ''));
+        if (!isNaN(changeVal) && Math.abs(changeVal) >= ALERT_THRESHOLD) {
+          isAlert = true;
+          item.isHighVolatility = true; // 標記此行需要警示顏色
+          alertMessages.push(`${item.name} ${item.changePercent}`);
+        }
       });
-    } else {
-      emailBody += `<tr><td colspan="6">無法取得市場指數資料</td></tr>`; // 如果 indexData 不是陣列，顯示錯誤訊息
     }
 
-    emailBody += `</tbody></table>`;
+    // 3. 動態建構主旨
+    let alertPrefix = isAlert ? `[ALERT: ${alertMessages.join(' | ')}]` : "[INFO]";
+    const emailSubject = `${alertPrefix} 每日市場指數報告`;
 
+    // 4. 建立 HTML 模板
+    const template = HtmlService.createTemplateFromFile('emailTemplate');
+    template.indexData = indexData;
+    template.fearGreedValue = fearGreedData.indexValue;
+    template.fearGreedCategory = fearGreedData.indexCategory;
+    template.isAlert = isAlert; 
+    template.timestamp = Utilities.formatDate(new Date(), timeZone, "yyyy-MM-dd HH:mm:ss");
 
-    //  加入 CNN 恐懼與貪婪指數
-    emailBody += `<h2>CNN 恐懼與貪婪指數 (Fear & Greed Index)</h2>`;
-    emailBody += `<p class="index-value">${fearGreedIndexValue} <span class="index-category">(${fearGreedIndexCategory})</span></p>`;
-    emailBody += `<p>資料來源：Google 試算表 (市場指數), CNN Money (Fear & Greed Index)</p>`; // 更新資料來源說明
-    emailBody += `</body></html>`;
+    const htmlBody = template.evaluate().getContent();
 
-
-    // 4. 寄送電子郵件
-    MailApp.sendEmail({
-      to: recipientEmail,
-      subject: emailSubject,
-      htmlBody: emailBody
+    // 5. 寄送郵件
+    GmailApp.sendEmail(recipientEmail, emailSubject, '', {
+      from: 'tai@taiwan-no1.net',
+      htmlBody: htmlBody,
+      name: 'Terminal-Market-Bot'
     });
-
-    Logger.log("每日市場指數報告郵件 (表格化) 已成功寄出至 " + recipientEmail);
-
+    Logger.log("多重警報監控郵件已成功寄出！");
 
   } catch (error) {
-    let errorBody = `<!DOCTYPE html><html><head><style>body { font-family: Arial, sans-serif; color: red; }</style></head><body>`;
-    errorBody += `<h1>每日市場指數報告 - 錯誤通知 (表格化)</h1>`; // 修改錯誤通知郵件標題
-    errorBody += `<p>程式執行時發生錯誤，無法取得市場指數資料或寄送郵件。</p>`;
-    errorBody += `<p>錯誤訊息：</p><pre style="background-color:#f0f0f0; padding:10px; border: 1px solid #ccc;">${error}</pre>`; // 將錯誤訊息包含在郵件中
-    errorBody += `<p>請檢查 Apps Script 執行記錄以獲取更詳細的錯誤資訊。</p>`;
-    errorBody += `</body></html>`;
-
-
-    MailApp.sendEmail({
-      to: recipientEmail,
-      subject: "每日市場指數報告 - 錯誤通知 (表格化)", // 修改錯誤通知郵件主旨
-      htmlBody: errorBody
-    });
-
-    Logger.log("錯誤報告郵件 (表格化) 已寄出至 " + recipientEmail + ". 原始錯誤訊息: " + error);
-    Logger.log("完整錯誤堆疊追蹤: " + error.stack); // 記錄更詳細的錯誤堆疊追蹤資訊
+    sendErrorEmail(recipientEmail, error); // 封裝錯誤郵件邏輯
   }
+}
+
+/** 錯誤通知函式 */
+function sendErrorEmail(recipient, error) {
+  let errorBody = `<!DOCTYPE html><html><head><style>body { font-family: monospace; color: #f85149; background: #0d1117; padding: 20px; }</style></head><body>`;
+  errorBody += `<h2>[SYSTEM ERROR] Market Report Failure</h2>`;
+  errorBody += `<p>執行發生異常，請檢查日誌：</p><pre style="background:#161b22; padding:15px; border:1px solid #30363d;">${error}</pre></body></html>`;
+  
+  MailApp.sendEmail({
+    to: recipient,
+    subject: "[CRITICAL] Market Report Error",
+    htmlBody: errorBody
+  });
 }
 
 
